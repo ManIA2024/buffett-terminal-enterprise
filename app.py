@@ -222,27 +222,36 @@ class ValuationEngine:
         revenue_ps = info.get('revenuePerShare', 0)
         
         ebitda = info.get('ebitda', 0)
+        fcf = info.get('freeCashflow', 0) # NUEVO: Flujo de Caja Libre
         total_cash = info.get('totalCash', 0)
         total_debt = info.get('totalDebt', 0)
+        enterprise_value = info.get('enterpriseValue', 0)
         
         # Extracción de los múltiplos actuales con los que cotiza la empresa
         current_pe = info.get('trailingPE', 0)
         current_pb = info.get('priceToBook', 0)
         current_ps = info.get('priceToSalesTrailing12Months', 0)
         current_ev_ebitda = info.get('enterpriseToEbitda', 0)
+        
+        # NUEVO: Calcular EV/FCF actual (protegiendo contra división por cero o flujos negativos)
+        current_ev_fcf = 0
+        if fcf and fcf > 0 and enterprise_value:
+            current_ev_fcf = enterprise_value / fcf
 
         return {
             "eps": eps,
             "book_value_ps": book_value_ps,
             "revenue_ps": revenue_ps,
             "ebitda": ebitda,
+            "fcf": fcf, # Añadido al diccionario
             "total_cash": total_cash,
             "total_debt": total_debt,
             "shares": self.shares_outstanding,
             "current_pe": current_pe,
             "current_pb": current_pb,
             "current_ps": current_ps,
-            "current_ev_ebitda": current_ev_ebitda
+            "current_ev_ebitda": current_ev_ebitda,
+            "current_ev_fcf": current_ev_fcf # Añadido al diccionario
         }
 
     def run_monte_carlo(self, iterations: int = 5000) -> Optional[np.ndarray]:
@@ -454,49 +463,50 @@ if ticker_input:
 # --- PESTAÑA 4: VALORACIÓN POR MÚLTIPLOS ---
         with tab4:
             st.markdown("### ⚖️ Valoración Relativa (Comparativa de Mercado)")
-            st.markdown("Observa cómo cotiza la empresa hoy y calcula su Precio Implícito al compararla con el promedio de sus competidores (Sector).")
+            st.markdown("Observa cómo cotiza la empresa hoy y calcula su Precio Implícito al compararla con el promedio de sus competidores.")
             
             multiples_data = engine.get_multiples_data()
             
-            # 1. Tabla superior: Múltiplos Actuales
-            c1, c2, c3, c4 = st.columns(4)
+            # 1. RENDERS DE MÉTRICAS (Verifica que existan las 5 columnas)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("PER Actual", f"{multiples_data['current_pe']:.2f}" if multiples_data['current_pe'] else "N/A")
             c2.metric("EV / EBITDA", f"{multiples_data['current_ev_ebitda']:.2f}" if multiples_data['current_ev_ebitda'] else "N/A")
-            c3.metric("Price / Book (P/B)", f"{multiples_data['current_pb']:.2f}" if multiples_data['current_pb'] else "N/A")
-            c4.metric("Price / Sales (P/S)", f"{multiples_data['current_ps']:.2f}" if multiples_data['current_ps'] else "N/A")
+            
+            # Verificación segura del EV/FCF
+            ev_fcf_val = multiples_data.get('current_ev_fcf', 0)
+            c3.metric("EV / FCF", f"{ev_fcf_val:.2f}" if ev_fcf_val > 0 else "N/A")
+            
+            c4.metric("Price / Book", f"{multiples_data['current_pb']:.2f}" if multiples_data['current_pb'] else "N/A")
+            c5.metric("Price / Sales", f"{multiples_data['current_ps']:.2f}" if multiples_data['current_ps'] else "N/A")
             
             st.divider()
             
-            # 2. Calculadora con Menú Desplegable
+            # 2. CALCULADORA INTERACTIVA
             st.markdown("#### 🧮 Calculadora de Precio Implícito")
-            
             col_sel, col_val, col_res = st.columns(3)
             
             with col_sel:
-                # MENÚ DESPLEGABLE PARA ELEGIR EL MÉTODO
                 metodo = st.selectbox(
                     "1. Selecciona el Múltiplo a evaluar:", 
-                    ["PER (Price/Earnings)", "EV / EBITDA", "P/B (Price / Book)", "P/S (Price / Sales)"]
+                    ["PER (Price/Earnings)", "EV / EBITDA", "EV / FCF", "P/B (Price / Book)", "P/S (Price / Sales)"]
                 )
                 
             with col_val:
-                # INPUT PARA EL PROMEDIO DEL SECTOR
                 target_multiple = st.number_input(
-                    "2. Ingresa el Múltiplo Objetivo (Promedio del Sector):", 
+                    "2. Ingresa el Múltiplo Objetivo (Promedio Sector):", 
                     min_value=0.1, 
                     value=15.0, 
-                    step=0.5,
-                    help="Si sus competidores cotizan a un PER de 20, ingresa 20 aquí."
+                    step=0.5
                 )
                 
             with col_res:
                 st.markdown("#### 🎯 Precio Implícito Estimado")
                 implied_price = 0
                 
-                # MOTOR MATEMÁTICO SEGÚN LA ELECCIÓN DEL MENÚ
+                # EJECUCIÓN DEL MOTOR MATEMÁTICO
                 if metodo == "PER (Price/Earnings)":
                     implied_price = multiples_data['eps'] * target_multiple
-                    st.caption("Fórmula: Beneficio por Acción (EPS) × PER Objetivo")
+                    st.caption("Fórmula: EPS × PER Objetivo")
                     
                 elif metodo == "P/B (Price / Book)":
                     implied_price = multiples_data['book_value_ps'] * target_multiple
@@ -508,23 +518,29 @@ if ticker_input:
                     
                 elif metodo == "EV / EBITDA":
                     if multiples_data['ebitda'] and multiples_data['shares']:
-                        # Enterprise Value Objetivo = EBITDA * Múltiplo Objetivo
                         target_ev = multiples_data['ebitda'] * target_multiple
-                        # Equity Value = EV + Caja - Deuda
                         implied_equity_value = target_ev + multiples_data['total_cash'] - multiples_data['total_debt']
                         implied_price = implied_equity_value / multiples_data['shares']
                     st.caption("Fórmula: ((EBITDA × Múltiplo) + Caja - Deuda) ÷ Acciones")
 
-                # RENDERIZADO DEL RESULTADO
+                elif metodo == "EV / FCF":
+                    fcf_val = multiples_data.get('fcf', 0)
+                    if fcf_val and fcf_val > 0 and multiples_data['shares']:
+                        target_ev = fcf_val * target_multiple
+                        implied_equity_value = target_ev + multiples_data['total_cash'] - multiples_data['total_debt']
+                        implied_price = implied_equity_value / multiples_data['shares']
+                    st.caption("Fórmula: ((FCF × Múltiplo) + Caja - Deuda) ÷ Acciones")
+
+                # DESPLIEGUE DEL RESULTADO FINAL
                 if implied_price > 0:
                     diferencia_porcentual = (implied_price / engine.current_price - 1) * 100
                     st.metric(
                         "Valor Justo Calculado", 
                         f"${implied_price:.2f}", 
-                        delta=f"{diferencia_porcentual:.1f}% vs Precio Actual de Mercado"
+                        delta=f"{diferencia_porcentual:.1f}% vs Mercado"
                     )
                 else:
-                    st.error("Datos insuficientes para la métrica seleccionada.")
+                    st.error("Datos insuficientes o flujos negativos para la métrica seleccionada.")
                     
 # --- PESTAÑA 5: COMPARADOR DE EMPRESAS (PEER ANALYSIS) ---
         with tab5:
